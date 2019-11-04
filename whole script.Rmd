@@ -1,0 +1,357 @@
+---
+title: "Topic Modelling and Visulisation"
+author: "Simone Mordue"
+date: "17/07/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+devtools::install_github("agoldst/dfrtopics")
+```
+
+## Packages
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(igraph)
+library(ggraph)
+library(readtext)
+library(mallet)
+library(dfrtopics)
+library(bibliometrix)
+library(tm)
+library(topicmodels)
+library(slam)
+library(lme4)
+library(dplyr)
+library(devtools)
+```
+## Create training model of SDG goals
+### Input training data
+```{r}
+
+D <- readtext("./training_data/*.txt")
+documents<-as.data.frame(D)
+docs1<-DataframeSource(D)
+docs.corp1<-VCorpus(docs1)
+length(docs.corp1)
+
+
+
+test<-stemDocument(D$text)
+test2<-stripWhitespace(test)
+test3<-removeNumbers(test2)
+test4<-removePunctuation(test3)
+test5<-stripWhitespace(test4)
+test5
+
+sort(stopwords("english"))
+
+test6 <- removeWords(test5, stopwords("english"))
+
+
+#no longer needed
+#dtm1 <- DocumentTermMatrix(docs.corp1)
+#
+#dim(dtm1)
+#rownames(dtm1) <- D$doc_id
+```
+### Create Mallet model
+1. Create mallet instances object
+2. Create a topic trainer object
+3. Load documents
+4. Get the vocabulary, and some statistics about word frequencies
+
+```{r warning=FALSE, message=FALSE, results='hide'}
+getwd()
+mallet.instances <- mallet.import(D$doc_id, test6, "./stopW.txt",
+	    		token.regexp = "\\p{L}[\\p{L}\\p{P}]+\\p{L}")
+topic.model <- MalletLDA(num.topics=18)
+m <- train_model(mallet.instances, n_topics=18, n_iters=10000, seed=1966)
+write_mallet_model(m, "MOD", save_instances = TRUE)
+topic.model$loadDocuments(mallet.instances)
+vocabulary <- topic.model$getVocabulary()
+word.freqs <- mallet.word.freqs(topic.model)
+topic.words<-mallet.topic.words(topic.model)
+doc.topics<-mallet.doc.topics(topic.model)
+topic.labels <- mallet.topic.labels(topic.model, topic.words, 10)
+
+```
+Optimize hyperparameters every 100 iterations, after 1000 burn-in iterations.
+```{r warning=FALSE, message=FALSE}
+topic.model$setAlphaOptimization(100, 1000)
+```
+Now train a model. Note that hyperparameter optimization is on, by default.
+We can specify the number of iterations. Here we'll use a large-ish round number.
+```{r warning=FALSE, message=FALSE, results='hide'}
+topic.model$train(10000)
+```
+## Infer SDG goals from published articles
+1. Create inferencer function and write to file
+2. Create function to find compatible inferences
+```{r warning=FALSE, message=FALSE}
+inferencer <- function (model) {
+  model$model$getInferencer()
+}
+
+inf<-inferencer(topic.model)
+write_inferencer <- function (inf, out_file) {
+  fos <- .jnew("java/io/FileOutputStream", out_file)
+  oos <- .jnew("java/io/ObjectOutputStream",
+               .jcast(fos, "java/io/OutputStream"))
+  oos$writeObject(inf)
+  oos$close()
+}
+
+write_inferencer(inf, "inf")
+```
+
+```{r}
+compatible_instances <- function (ids, texts, instances) {
+  mallet_pipe <- instances$getPipe()
+  
+  new_insts <- .jnew("cc/mallet/types/InstanceList",
+                     .jcast(mallet_pipe, "cc/mallet/pipe/Pipe"))
+  
+  J("cc/mallet/topics/RTopicModel")$addInstances(new_insts, ids, texts)
+  
+  new_insts
+}
+```
+### Input articles to classify
+```{r}
+
+pubs <- readFiles("./new_search/savedrecs(27).txt","./new_search/savedrecs(28).txt", "./new_search/savedrecs(29).txt", "./new_search/savedrecs(30).txt",
+"./new_search/savedrecs(31).txt",
+"./new_search/savedrecs(32).txt","./new_search/savedrecs(33).txt",
+"./new_search/savedrecs(34).txt", "./new_search/savedrecs(35).txt", "./new_search/savedrecs(36).txt")
+              
+```
+### Tidy and manipulate
+```{r warning=FALSE, message=FALSE, results='hide'}
+M <- convert2df(pubs, dbsource = "isi", format = "plaintext")
+```
+
+
+```{r warning=FALSE, message=FALSE, results='hide'}
+
+sort(names(M))
+
+#how many articles dont have abstracts?
+length(which(is.na(M$AB)))
+
+M <- M[-which(is.na(M$AB)),]
+
+files <- M$AB
+
+summary(files)
+
+txt2<- M %>% dplyr::select(TI, AB, AU, PY)
+
+names(txt2) <- c("doc_id", "text", "Author", "PY")
+
+docs<-DataframeSource(txt2)
+docs.corp<-VCorpus(docs)
+length(docs.corp)
+docs.corp <-tm_map(docs.corp,content_transformer(tolower))
+pubtripe <- c("(c)", "elsevier", "ltd", "all rights reserved")
+
+docs.corp <- tm_map(docs.corp, removeWords, pubtripe)
+
+sort(stopwords("english"))
+
+docs.corp <- tm_map(docs.corp, removeWords, stopwords("english"))
+
+# Change hyphen and slash to space
+
+toSpace <- content_transformer(function(x, pattern) { return (gsub(pattern, " ", x))})
+
+docs.corp <- tm_map(docs.corp, toSpace, "-")
+
+docs.corp <- tm_map(docs.corp, toSpace, "/")
+docs.corp <- tm_map(docs.corp, removePunctuation)
+
+# Strip digits
+
+docs.corp <- tm_map(docs.corp, removeNumbers)
+
+
+
+# Remove whitespace
+
+docs.corp <- tm_map(docs.corp, stripWhitespace)
+
+
+docs.corp <- tm_map(docs.corp,stemDocument) 
+
+
+searchterms <- c("small","australian", "island","bahrain", 
+                                    "cabo verde", "comoros", "guinea", "maldives", 
+                 "mauritius", "sao tome", "seychelles", "singapore",
+                 "caribbean", "antigua", "barbuda",
+                 "bahamas", "barbados", "belize", "cuba", "dominica*",
+                 "grenada", "guyana", "haiti", "jamaica", "saint", "kitts",
+                 "nevis", "saint", "lucia", "saint", "vincent",
+                 "suriname",  "trinidad",  "tobago", "fiji",  "kiribati", 
+                 "marshall islands","micronesia", "nauru", "palau", 
+                 "papua new guinea",  "samoa",  "solomon", "islands",
+                 "timor leste",  "tonga",  "tuvalu" , "vanuatu", "also",
+                 "develop", "sustain", "nation", "govern","will", "country",
+                 "e", "implement", "pacific", "manage", "goal", "plan", 
+                 "voluntary", "action", "national","region", "review", "sdg", 
+                 "sdgs", "active", "within", "one", "use", "cost", "can", "need",
+                 "use", "two", "new", "may", "show", "low", "high", "sample")
+
+
+
+## Search terms then have to be stemmed to match the already stemmed corpus
+
+stemsearchterms <- unique(stemDocument(searchterms))
+
+stemsearchterms
+## Remove search terms
+
+docs.corp <- tm_map(docs.corp, removeWords, stemsearchterms)
+# Remove whitespace one more time
+
+docs.corp <- tm_map(docs.corp, stripWhitespace)
+dtm <- DocumentTermMatrix(docs.corp)
+
+dim(dtm)
+rownames(dtm) <- txt2$doc_id
+
+## Create binary matrix to count number of articles that each word appears in
+
+dtmbin <- dtm
+dtmbin[which(apply(dtmbin, 2, function(x) x>=1))] <- 1
+
+## Have a look at the proportion of words contained in N or fewer articles...
+
+length(which(col_sums(dtmbin)<=1))/ncol(dtmbin)
+length(which(col_sums(dtmbin)<=2))/ncol(dtmbin)
+dtm <- dtm[,-which(col_sums(dtmbin)<=3)]  
+
+dim(dtm)
+```
+
+### Find compatible instances and write to file
+```{r}
+ins<-compatible_instances(txt2$doc_id, txt2$text, mallet.instances)
+#ins<-compatible_instances(dtm$dimnames$Docs, dtm$dimnames$Terms, mallet.instances)
+write_instances(ins ,"instances")
+
+```
+### Create function to read in inferences from topic model then read it in
+```{r}
+read_inferencer <- function (in_file) {
+  J("cc.mallet.topics.TopicInferencer")$read(
+    new(J("java.io.File"), in_file)
+  )
+}
+
+inf<-read_inferencer("./inf")
+```
+### Create function to infer SDGs from new articles
+```{r}
+infer_topics <- function (inferencer, instances,
+                          n_iterations=1000,
+                          sampling_interval=100,
+                          burn_in=1000,
+                        random_seed=NULL) {
+  
+  iter <- instances$iterator()
+  n_iterations <- as.integer(n_iterations)
+  sampling_interval <- as.integer(sampling_interval)
+  burn_in <- as.integer(burn_in)
+  if (!is.null(random_seed)) {
+    inferencer$setRandomSeed(as.integer(random.seed))
+  }
+  
+  doc_topics <- vector("list", instances$size())
+  for (j in 1:instances$size()) {
+    inst <- .jcall(iter, "Ljava/lang/Object;", "next")
+    doc_topics[[j]] <- inferencer$getSampledDistribution(inst,
+                                                         n_iterations, sampling_interval, burn_in)
+  }
+  
+  do.call(rbind, doc_topics)
+}
+```
+### infer SDGs and write to file
+```{r}
+classified_pubs<-infer_topics(inf, ins)
+
+row.names(classified_pubs)<-txt2$doc_id
+
+write.csv(classified_pubs, "./classified_pubs_by_SDGscore.csv")
+
+```
+## Assign one Goal to each of the articles in the classified pubs dataframe
+### Create DF with just data columns of classified_pubs
+### Find maximum vales in rows and assign column headers, export as New DF
+### Create new DF containing article title and assigned column heading
+```{r}
+classified_pubs<-as.data.frame(classified_pubs)
+df3<-classified_pubs[,1:18]
+df2<-data.frame()
+for (i in 1:nrow(df3)){
+    df2[i,1]<-colnames(df3[which.max(df3[i,])])
+}
+pubs<-row.names(classified_pubs)
+df4<-cbind(pubs, df2)
+```
+## check which goals are indicated by which column by looking at topic.labels then read in file with associated goal names
+```{r}
+goals_list<-read.csv("C:/Users/nsm131/OneDrive - Newcastle University/SDG_model/New_topic_model/goals_list.csv")
+```
+## reorder goals numbers
+### edit df4 to remove characters from V1 
+### merge goals list with corresponding characters in df4
+```{r}
+df4$V1 <- sapply(df4$V1, function(x) gsub("V", "" ,x))
+dat <- merge(df4, goals_list, by = "V1", all.x = TRUE)
+```
+## Combine classified literature with challenge data by matching goal
+## count number of publicationss linking goal to challenge
+```{r}
+chall <- read.csv("C:/Users/nsm131/OneDrive - Newcastle University/SDG_model/New_topic_model/challenge_goal.csv", header=FALSE)
+library(reshape2)
+
+moo<-melt(chall)
+foo<-na.omit(moo)
+colnames(foo)<-c("challenge", "variable", "Goal.number")
+finaldf<- merge(foo, dat, by = "Goal.number", all.x = TRUE)
+library(dplyr)
+finaldf<-finaldf[,-3]
+finaldf<-finaldf[,-3]
+
+testdf<-finaldf%>% 
+  group_by(challenge, Goal.name) %>% 
+  summarise(n = n())
+
+#remove unused filter level
+
+testdf<-droplevels.data.frame(testdf)
+write.csv(testdf, "./finaldata.csv")
+```
+##plot results
+```{r}
+library(ggplot2)
+ggplot(data = testdf, aes(x = Goal.name, y = challenge)) +
+  geom_point(aes(size = n, colour = "All publications")) +
+  scale_x_discrete(drop=FALSE) + # can't remember now what this did.
+  scale_y_discrete(drop=FALSE) +
+  scale_colour_manual(values=c("#000000", "#0A97D9"), name = "Type") +
+  scale_size_area(name = "Number", max_size = 10, breaks = c(100, 200, 300, 400, 500, 600, 700, 800)) + # manually adjust the breaks of the dot sizes
+  xlab("SDG") +
+  ylab("Challenge") +
+  theme(text = element_text(size=8), 
+        axis.text.x  = element_text(angle=90, vjust=0.5), 
+        panel.grid.major = element_line(colour = "grey70"), 
+        panel.background = element_rect(colour = "grey70", fill="NA"),
+        legend.key  = element_rect(fill = "NA"))+
+  guides(colour = guide_legend(nrow = 2), size = guide_legend(nrow = 3)) # arrange legend
+
+```
+
+
